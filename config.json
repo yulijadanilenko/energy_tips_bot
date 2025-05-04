@@ -1,0 +1,10 @@
+{
+  "bot_token": "PASTE_YOUR_BOT_TOKEN_HERE",
+  "groups": [
+    { "id": "-1000000000000", "name": "Example Group" }
+  ],
+  "messages": [
+    { "name": "daily_tip", "content": "Выключайте свет, когда уходите из комнаты." }
+  ],
+  "schedule_interval": "0 9 * * *"
+}
