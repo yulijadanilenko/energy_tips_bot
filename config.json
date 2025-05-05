@@ -6,5 +6,5 @@
   "messages": [
     { "name": "daily_tip", "content": "Выключайте свет, когда уходите из комнаты." }
   ],
-  "schedule_interval": "0 9 * * *"
+  "schedule_interval": "45 11 * * *"
 }
