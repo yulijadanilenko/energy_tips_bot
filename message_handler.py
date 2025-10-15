@@ -55,14 +55,41 @@ class MessageHandler:
         t = threading.Thread(target=_poll, daemon=True)
         t.start()
 
-    def _inline_keyboard(self, key: str, buttons: list[str] | None):
-        labels = buttons or ["👍 Да", "🤔 Пока нет"]
-        kb = InlineKeyboardMarkup()
-        kb.row(
-            InlineKeyboardButton(labels[0], callback_data=f"answer:{key}:yes"),
-            InlineKeyboardButton(labels[1], callback_data=f"answer:{key}:no"),
+    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def _inline_keyboard(self, key: str, labels: list | None) -> InlineKeyboardMarkup:
+    # страховка: если кнопок нет/мало — подставим дефолт
+    labels = labels or ["👍 Да", "🤔 Пока нет"]
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    buttons = []
+
+    # первая кнопка (yes)
+    if len(labels) >= 1 and labels[0]:
+        buttons.append(
+            InlineKeyboardButton(
+                labels[0], callback_data=f"answer:{key}:yes"
+            )
         )
-        return kb
+
+    # вторая кнопка (no)
+    if len(labels) >= 2 and labels[1]:
+        buttons.append(
+            InlineKeyboardButton(
+                labels[1], callback_data=f"answer:{key}:no"
+            )
+        )
+
+    # если всё же одна кнопка — добавим заглушку «Пока нет»
+    if len(buttons) == 1:
+        buttons.append(
+            InlineKeyboardButton(
+                "🤔 Пока нет", callback_data=f"answer:{key}:no"
+            )
+        )
+
+    kb.add(*buttons)
+    return kb
 
     # ---------- scheduler job ----------
     def send_daily_message(self):
