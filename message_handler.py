@@ -1,7 +1,8 @@
 import logging
 import random
+import threading
 import telebot
-from telebot import types
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 class MessageHandler:
@@ -10,41 +11,78 @@ class MessageHandler:
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
 
-    def _build_markup(self, msg: dict):
-        buttons = msg.get("buttons")
-        if not buttons:
-            return None
-        markup = types.InlineKeyboardMarkup()
-        key = msg.get("key", "btn")
-        row = [types.InlineKeyboardButton(text=b, callback_data=f"{key}:{i}")
-               for i, b in enumerate(buttons)]
-        markup.row(*row)
-        return markup
+        # регистрируем обработчики и запускаем polling в фоне
+        self._register_handlers()
+        self._start_polling_thread()
 
+    # ---------- helpers ----------
+    def _register_handlers(self):
+        @self.bot.callback_query_handler(func=lambda c: c.data.startswith("answer:"))
+        def on_answer(call):
+            try:
+                _, key, decision = call.data.split(":", 2)
+
+                # убираем кнопки под исходным сообщением (если получится)
+                try:
+                    self.bot.edit_message_reply_markup(
+                        chat_id=call.message.chat.id,
+                        message_id=call.message.message_id,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+
+                # короткий фидбек
+                if decision == "yes":
+                    reply = "✅ Отлично! Так держать 💪"
+                else:
+                    reply = "👌 Спасибо за честность. Попробуй сегодня — это просто!"
+
+                self.bot.answer_callback_query(call.id, "Ответ записан")
+                self.bot.send_message(call.message.chat.id, reply)
+
+            except Exception as e:
+                self.logger.error(f"Failed to process answer: {e}")
+
+    def _start_polling_thread(self):
+        def _poll():
+            while True:
+                try:
+                    self.bot.infinity_polling(timeout=60, long_polling_timeout=60)
+                except Exception as e:
+                    self.logger.error(f"Polling crashed: {e}")
+
+        t = threading.Thread(target=_poll, daemon=True)
+        t.start()
+
+    def _inline_keyboard(self, key: str, buttons: list[str] | None):
+        labels = buttons or ["👍 Да", "🤔 Пока нет"]
+        kb = InlineKeyboardMarkup()
+        kb.row(
+            InlineKeyboardButton(labels[0], callback_data=f"answer:{key}:yes"),
+            InlineKeyboardButton(labels[1], callback_data=f"answer:{key}:no"),
+        )
+        return kb
+
+    # ---------- scheduler job ----------
     def send_daily_message(self):
         messages = self.config.get("messages", [])
         if not messages:
-            self.logger.error("No messages in config.")
+            self.logger.warning("No messages in config")
             return
 
-        msg = random.choice(messages)
-
-        # поддерживаем оба поля
-        text = (msg.get("text") or msg.get("content") or "").strip()
+        message = random.choice(messages)
+        text = (message.get("text") or "").strip()
         if not text:
-            self.logger.warning("Skipped empty message: %s", msg)
+            self.logger.warning("Empty message text")
             return
 
-        markup = self._build_markup(msg)
+        key = message.get("key", "q")
+        kb = self._inline_keyboard(key, message.get("buttons"))
 
         for group in self.config.get("groups", []):
             try:
-                self.bot.send_message(
-                    chat_id=group["id"],
-                    text=text,
-                    reply_markup=markup,
-                    disable_web_page_preview=True
-                )
+                self.bot.send_message(group["id"], text, reply_markup=kb)
                 self.logger.info(f"Sent to {group['name']}")
             except Exception as e:
                 self.logger.error(f"Failed for {group['name']}: {e}")
