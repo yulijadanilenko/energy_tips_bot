@@ -3,7 +3,8 @@
   "schedule_interval": "*/9 * * * *",
   "groups": [
   { "id": "-1002519109332", "name": "energogymn_test" },
-  { "id": "-1003169807297", "name": "gimn8_9a" }
+  { "id": "-1003169807297", "name": "9a_energomarafon" },
+  { "id": "-1003173617727", "name": "7a_energomarafon" }
 ],
   "messages": [
 
