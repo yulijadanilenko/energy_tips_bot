@@ -91,7 +91,7 @@ def _inline_keyboard(self, key: str, labels: list | None) -> InlineKeyboardMarku
     kb.add(*buttons)
     return kb
 
-    # ---------- scheduler job ----------
+    # ----------- scheduler job -----------
     def send_daily_message(self):
         messages = self.config.get("messages", [])
         if not messages:
@@ -105,7 +105,7 @@ def _inline_keyboard(self, key: str, labels: list | None) -> InlineKeyboardMarku
             return
 
         key = message.get("key", "q")
-        kb = self._inline_keyboard(key, message.get("buttons"))
+        kb = self._inline_keyboard(key, message.get("buttons", []))
 
         for group in self.config.get("groups", []):
             try:
