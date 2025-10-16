@@ -1,6 +1,6 @@
 {
   "bot_token": "7821435288:AAFZjvXGYkEN1mLlhEzdeoqkZThIf8vCRaU",
-  "schedule_interval": "0 15 * * *",
+  "schedule_interval": "*/9 * * * *",
   "groups": [
   { "id": "-1002519109332", "name": "energogymn_test" },
   { "id": "-1003169807297", "name": "gimn8_9a" }
