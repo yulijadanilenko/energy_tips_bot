@@ -1,2 +1,4 @@
 pyTelegramBotAPI
 apscheduler
+gspread
+google-auth
