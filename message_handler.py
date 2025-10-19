@@ -1,7 +1,14 @@
+import os
+import json
 import telebot
 from telebot import types
 import random
 import logging
+from datetime import datetime
+
+# gspread + google-auth для Google Sheets
+import gspread
+from google.oauth2.service_account import Credentials
 
 
 class MessageHandler:
@@ -9,12 +16,47 @@ class MessageHandler:
         self.bot = telebot.TeleBot(token)
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
+
+        # ---------- Инициализация Google Sheets ----------
+        self.gc = None
+        self.sheet = None
+        try:
+            creds_json = os.getenv("GOOGLE_CREDENTIALS", "")
+            spreadsheet_id = os.getenv("SPREADSHEET_ID", "")
+
+            if creds_json and spreadsheet_id:
+                info = json.loads(creds_json)
+
+                scopes = [
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive",
+                ]
+                creds = Credentials.from_service_account_info(info, scopes=scopes)
+                self.gc = gspread.authorize(creds)
+
+                # первая вкладка (либо создадим “Responses”, если нужно поменять — измените имя)
+                sh = self.gc.open_by_key(spreadsheet_id)
+                try:
+                    self.sheet = sh.worksheet("Responses")
+                except gspread.exceptions.WorksheetNotFound:
+                    self.sheet = sh.add_worksheet(title="Responses", rows="1000", cols="20")
+                    # шапка
+                    self.sheet.append_row(
+                        ["timestamp", "chat_title", "chat_id", "user", "user_id",
+                         "question_key", "answer_value", "message_id"],
+                        value_input_option="USER_ENTERED"
+                    )
+                self.logger.info("Google Sheets connected.")
+            else:
+                self.logger.warning("GOOGLE_CREDENTIALS or SPREADSHEET_ID not set – answers won't be saved to Sheets.")
+        except Exception as e:
+            self.logger.error(f"Failed to init Google Sheets: {e}")
+
         self._register_handlers()
 
     # ---------------- Создание кнопок ----------------
     def _inline_keyboard(self, key, buttons):
         kb = types.InlineKeyboardMarkup(row_width=2)
-
         if not buttons:
             return kb
 
@@ -23,12 +65,10 @@ class MessageHandler:
             data = f"answer:{key}:{'yes' if i == 0 else 'no'}"
             inline_buttons.append(types.InlineKeyboardButton(label, callback_data=data))
 
-        # если только одна кнопка, добавим вторую "Пока нет"
         if len(inline_buttons) == 1:
             inline_buttons.append(
                 types.InlineKeyboardButton("🤔 Пока нет", callback_data=f"answer:{key}:no")
             )
-
         kb.add(*inline_buttons)
         return kb
 
@@ -66,9 +106,30 @@ class MessageHandler:
                 self.bot.answer_callback_query(call.id)
                 return
 
+            # Записываем в Google Sheets (если подключено)
+            try:
+                if self.sheet:
+                    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    chat_title = getattr(call.message.chat, "title", "") or call.message.chat.username or ""
+                    user_name = (call.from_user.full_name or "").strip()
+                    self.sheet.append_row(
+                        [
+                            ts,
+                            chat_title,
+                            call.message.chat.id,
+                            user_name,
+                            call.from_user.id,
+                            key,
+                            val,
+                            call.message.message_id,
+                        ],
+                        value_input_option="USER_ENTERED",
+                    )
+            except Exception as e:
+                self.logger.error(f"Failed to append to sheet: {e}")
+
             # одно благодарственное сообщение без дублей
             msg = "👍 Принято! Спасибо." if val == "yes" else "✅ Ответ записан."
-
             try:
                 self.bot.answer_callback_query(call.id, "Ответ сохранён ✅")
                 self.bot.send_message(call.message.chat.id, msg)
