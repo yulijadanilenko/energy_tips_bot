@@ -24,6 +24,11 @@ class MessageHandler:
             creds_json = os.getenv("GOOGLE_CREDENTIALS", "")
             spreadsheet_id = os.getenv("SPREADSHEET_ID", "")
 
+            # 🔎 ОТЛАДКА: проверяем, что переменные окружения пришли
+            self.logger.info(
+                f"ENV check: creds_len={len(creds_json)}, sheet_id_head={spreadsheet_id[:8]}"
+            )
+
             if creds_json and spreadsheet_id:
                 info = json.loads(creds_json)
 
@@ -34,7 +39,7 @@ class MessageHandler:
                 creds = Credentials.from_service_account_info(info, scopes=scopes)
                 self.gc = gspread.authorize(creds)
 
-                # первая вкладка (либо создадим “Responses”, если нужно поменять — измените имя)
+                # первая вкладка (или создаём “Responses”)
                 sh = self.gc.open_by_key(spreadsheet_id)
                 try:
                     self.sheet = sh.worksheet("Responses")
@@ -46,11 +51,17 @@ class MessageHandler:
                          "question_key", "answer_value", "message_id"],
                         value_input_option="USER_ENTERED"
                     )
-                self.logger.info("Google Sheets connected.")
+
+                # 🔎 ОТЛАДКА: кто мы для Google
+                self.logger.info(f"Google Sheets OK as {info.get('client_email')}")
             else:
-                self.logger.warning("GOOGLE_CREDENTIALS or SPREADSHEET_ID not set – answers won't be saved to Sheets.")
-        except Exception as e:
-            self.logger.error(f"Failed to init Google Sheets: {e}")
+                # если чего-то не хватает — явно логируем
+                self.logger.warning(
+                    "GOOGLE_CREDENTIALS or SPREADSHEET_ID not set – answers won't be saved to Sheets."
+                )
+        except Exception:
+            # полный traceback, чтобы сразу видеть причину
+            self.logger.exception("Failed to init Google Sheets")
 
         self._register_handlers()
 
@@ -112,21 +123,23 @@ class MessageHandler:
                     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     chat_title = getattr(call.message.chat, "title", "") or call.message.chat.username or ""
                     user_name = (call.from_user.full_name or "").strip()
-                    self.sheet.append_row(
-                        [
-                            ts,
-                            chat_title,
-                            call.message.chat.id,
-                            user_name,
-                            call.from_user.id,
-                            key,
-                            val,
-                            call.message.message_id,
-                        ],
-                        value_input_option="USER_ENTERED",
-                    )
-            except Exception as e:
-                self.logger.error(f"Failed to append to sheet: {e}")
+                    row = [
+                        ts,
+                        chat_title,
+                        call.message.chat.id,
+                        user_name,
+                        call.from_user.id,
+                        key,
+                        val,
+                        call.message.message_id,
+                    ]
+                    self.sheet.append_row(row, value_input_option="USER_ENTERED")
+                    # 🔎 ОТЛАДКА: подтверждаем запись строки
+                    self.logger.info(f"Sheet append OK: {row[:4]} ...")
+                else:
+                    self.logger.warning("Sheet is not initialized; skipping append.")
+            except Exception:
+                self.logger.exception("Failed to append to sheet")
 
             # одно благодарственное сообщение без дублей
             msg = "👍 Принято! Спасибо." if val == "yes" else "✅ Ответ записан."
