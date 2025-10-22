@@ -12,7 +12,7 @@ def main():
     logger = logging.getLogger("telegram_bot")
 
     config = ConfigManager().load_config()
-    bot_token = config.get("bot_token", "")
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
 
     if not bot_token:
         logger.error("Bot token not found.")
