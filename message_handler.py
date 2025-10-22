@@ -111,13 +111,59 @@ class MessageHandler:
 
     # ---------------- Обработка ответов ----------------
     def _register_handlers(self):
-        @self.bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("answer:"))
-        def _on_answer(call: types.CallbackQuery):
-            try:
-                _, key, val = call.data.split(":")
-            except Exception:
-                self.bot.answer_callback_query(call.id)
-                return
+    @self.bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("answer:"))
+    def _on_answer(call: types.CallbackQuery):
+        try:
+            _, key, val = call.data.split(":")
+        except Exception:
+            # некорректные данные — просто закрываем всплывашку
+            self.bot.answer_callback_query(call.id)
+            return
+
+        # ---- защита от повторных ответов одним и тем же пользователем ----
+        answered_key = (call.message.chat.id, call.message.message_id, call.from_user.id)
+        if answered_key in self._answered:
+            self.bot.answer_callback_query(call.id, "Вы уже отвечали 👍")
+            return
+
+        # помечаем, что этот пользователь на этот вопрос уже ответил
+        self._answered.add(answered_key)
+
+        # ---- запись в Google Sheets (если настроено) ----
+        try:
+            if self.sheet:
+                ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                chat_title = getattr(call.message.chat, "title", "") or call.message.chat.username or ""
+                user_name = (call.from_user.full_name or "").strip()
+
+                row = [
+                    ts,
+                    chat_title,
+                    call.message.chat.id,
+                    user_name,
+                    call.from_user.id,
+                    key,
+                    val,
+                    call.message.message_id,
+                ]
+                self.sheet.append_row(row, value_input_option="USER_ENTERED")
+                self.logger.info(f"Sheet append OK: {row[:4]} ...")
+            else:
+                self.logger.warning("Sheet is not initialized; skipping append.")
+        except Exception:
+            self.logger.exception("Failed to append to sheet")
+
+        # ---- обратная связь пользователю ----
+        msg = "👍 Принято! Спасибо." if val == "yes" else "✅ Ответ записан."
+        try:
+            self.bot.answer_callback_query(call.id, "Ответ сохранён ✅")
+            self.bot.send_message(call.message.chat.id, msg)
+        except Exception as e:
+            self.logger.error(f"Error sending response: {e}")
+
+        # ВАЖНО: НЕ удаляем клавиатуру у исходного сообщения,
+        # чтобы другие участники тоже могли ответить.
+        # (поэтому блок edit_message_reply_markup удалён)
 
             # Записываем в Google Sheets (если подключено)
             try:
