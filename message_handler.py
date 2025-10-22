@@ -27,7 +27,7 @@ class MessageHandler:
             creds_json = os.getenv("GOOGLE_CREDENTIALS", "")
             spreadsheet_id = os.getenv("SPREADSHEET_ID", "")
 
-            # 🔎 ОТЛАДКА: проверяем, что переменные окружения пришли
+            # Отладка окружения
             self.logger.info(
                 f"ENV check: creds_len={len(creds_json)}, sheet_id_head={spreadsheet_id[:8]}"
             )
@@ -55,15 +55,12 @@ class MessageHandler:
                         value_input_option="USER_ENTERED"
                     )
 
-                # 🔎 ОТЛАДКА: кто мы для Google
                 self.logger.info(f"Google Sheets OK as {info.get('client_email')}")
             else:
-                # если чего-то не хватает — явно логируем
                 self.logger.warning(
                     "GOOGLE_CREDENTIALS or SPREADSHEET_ID not set – answers won't be saved to Sheets."
                 )
         except Exception:
-            # полный traceback, чтобы сразу видеть причину
             self.logger.exception("Failed to init Google Sheets")
 
         self._register_handlers()
@@ -155,21 +152,14 @@ class MessageHandler:
             except Exception:
                 self.logger.exception("Failed to append to sheet")
 
-            # --- обратная связь пользователю ---
-            msg = "👍 Принято! Спасибо." if val == "yes" else "✅ Ответ записан."
+            # --- ТИХИЙ РЕЖИМ ---
+            # Только всплывающее уведомление. Сообщения в чат НЕ отправляем.
             try:
                 self.bot.answer_callback_query(call.id, "Ответ сохранён ✅")
-                # Ответим в нитке к исходному сообщению, чтобы не засорять чат
-                self.bot.send_message(
-                    call.message.chat.id,
-                    msg,
-                    reply_to_message_id=call.message.message_id
-                )
             except Exception as e:
-                self.logger.error(f"Error sending response: {e}")
+                self.logger.error(f"Error in answer_callback_query: {e}")
 
-            # Важно: клавиатуру у исходного сообщения НЕ убираем,
-            # чтобы другие участники тоже могли ответить.
+            # Клавиатуру НЕ убираем — другие участники тоже могут ответить.
 
     # ---------------- Запуск ----------------
     def start(self):
