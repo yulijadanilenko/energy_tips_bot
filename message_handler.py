@@ -16,6 +16,8 @@ class MessageHandler:
         self.bot = telebot.TeleBot(token)
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
+        
+        self._answered = set()  # (chat_id, message_id, user_id) — кто уже отвечал
 
         # ---------- Инициализация Google Sheets ----------
         self.gc = None
