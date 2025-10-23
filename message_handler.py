@@ -14,15 +14,17 @@ from google.oauth2.service_account import Credentials
 
 class MessageHandler:
     def __init__(self, token, config):
+        # Инициализируем бота, конфиг и логгер
         self.bot = telebot.TeleBot(token)
-        # Переключаемся на polling: снимаем webhook и отбрасываем висящие апдейты
-try:
-    self.bot.remove_webhook(drop_pending_updates=True)
-    self.logger.info("Webhook removed (switching to polling).")
-except Exception as e:
-    self.logger.warning(f"remove_webhook failed: {e}")
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
+
+        # Переключаемся на polling: снимаем webhook и отбрасываем висящие апдейты
+        try:
+            self.bot.remove_webhook(drop_pending_updates=True)
+            self.logger.info("Webhook removed (switching to polling).")
+        except Exception as e:
+            self.logger.warning(f"remove_webhook failed: {e}")
 
         # (chat_id, message_id, user_id) — чтобы один человек не мог ответить дважды на один и тот же вопрос
         self._answered = set()
