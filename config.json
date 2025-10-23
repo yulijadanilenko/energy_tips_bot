@@ -1,6 +1,6 @@
 {
   "bot_token": "7821435288:AAEbkngMOlMNKwV_zDgzkCmJlKkTdHb3RrI",
-  "schedule_interval": "0 16 * * *",
+  "schedule_interval": "0 13 * * *",
   "groups": [
   { "id": "-1002519109332", "name": "energogymn_test" },
   { "id": "-1003169807297", "name": "9a_energomarafon" }, 
