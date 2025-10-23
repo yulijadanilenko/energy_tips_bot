@@ -4,6 +4,7 @@ import telebot
 from telebot import types
 import random
 import logging
+import time
 from datetime import datetime
 
 # gspread + google-auth для Google Sheets
@@ -14,6 +15,12 @@ from google.oauth2.service_account import Credentials
 class MessageHandler:
     def __init__(self, token, config):
         self.bot = telebot.TeleBot(token)
+        # Переключаемся на polling: снимаем webhook и отбрасываем висящие апдейты
+try:
+    self.bot.remove_webhook(drop_pending_updates=True)
+    self.logger.info("Webhook removed (switching to polling).")
+except Exception as e:
+    self.logger.warning(f"remove_webhook failed: {e}")
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
 
