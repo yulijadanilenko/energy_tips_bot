@@ -1,11 +1,13 @@
 import os
 import json
+import time
+import logging
+import random
+from datetime import datetime
+
 import telebot
 from telebot import types
-import random
-import logging
-import time
-from datetime import datetime
+from telebot.apihelper import ApiTelegramException
 
 # gspread + google-auth для Google Sheets
 import gspread
@@ -14,19 +16,12 @@ from google.oauth2.service_account import Credentials
 
 class MessageHandler:
     def __init__(self, token, config):
-        # Инициализируем бота, конфиг и логгер
+        # Инициализация бота (без webhook)
         self.bot = telebot.TeleBot(token)
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
 
-        # Переключаемся на polling: снимаем webhook и отбрасываем висящие апдейты
-        try:
-            self.bot.remove_webhook(drop_pending_updates=True)
-            self.logger.info("Webhook removed (switching to polling).")
-        except Exception as e:
-            self.logger.warning(f"remove_webhook failed: {e}")
-
-        # (chat_id, message_id, user_id) — чтобы один человек не мог ответить дважды на один и тот же вопрос
+        # (chat_id, message_id, user_id) — защита от повторных ответов одним человеком
         self._answered = set()
 
         # ---------- Инициализация Google Sheets ----------
@@ -51,13 +46,11 @@ class MessageHandler:
                 creds = Credentials.from_service_account_info(info, scopes=scopes)
                 self.gc = gspread.authorize(creds)
 
-                # первая вкладка (или создаём “Responses”)
                 sh = self.gc.open_by_key(spreadsheet_id)
                 try:
                     self.sheet = sh.worksheet("Responses")
                 except gspread.exceptions.WorksheetNotFound:
                     self.sheet = sh.add_worksheet(title="Responses", rows="1000", cols="20")
-                    # шапка
                     self.sheet.append_row(
                         ["timestamp", "chat_title", "chat_id", "user", "user_id",
                          "question_key", "answer_value", "message_id"],
@@ -170,7 +163,53 @@ class MessageHandler:
 
             # Клавиатуру НЕ убираем — другие участники тоже могут ответить.
 
+    # ---------------- Надёжный запуск polling ----------------
+    def _run_polling_forever(self):
+        """
+        Запускает infinity_polling в бесконечном цикле.
+        Если случился 409 Conflict (или сетевые проблемы),
+        аккуратно ждём и пробуем снова.
+        """
+        # На всякий случай отключаем webhook перед polling
+        try:
+            # Без параметров (в некоторых версиях telebot нет drop_pending_updates)
+            self.bot.remove_webhook()
+            self.logger.info("Webhook removed (switching to polling).")
+        except Exception as e:
+            self.logger.warning(f"remove_webhook failed: {e}")
+
+        backoff = 3  # начальная задержка между попытками
+        while True:
+            try:
+                # Основной бесконечный polling
+                self.logger.info("Starting infinity_polling...")
+                # Параметры таймаутов помогают пережить сетевые разрывы
+                self.bot.infinity_polling(timeout=60, long_polling_timeout=50)
+            except ApiTelegramException as e:
+                text = str(e)
+                # Ошибка двойного запуска (409)
+                if "409" in text or "Conflict" in text:
+                    self.logger.error("409 Conflict: другой экземпляр бота сейчас получает обновления. "
+                                      "Ожидаю и пробую снова...")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 60)  # экспоненциальный бэкофф, максимум 60 сек
+                    continue
+                # Любая другая ошибка Telegram API
+                self.logger.exception("Telegram API error. Will retry.")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+            except Exception:
+                # Сетевые и прочие ошибки
+                self.logger.exception("Unexpected error in polling. Will retry.")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+            else:
+                # Если infinity_polling завершился без исключения — небольшой перезапуск
+                self.logger.info("Polling finished gracefully. Restarting shortly...")
+                time.sleep(2)
+                backoff = 3  # сбрасываем бэкофф
+
     # ---------------- Запуск ----------------
     def start(self):
         self.logger.info("Бот запущен и готов к приёму сообщений.")
-        self.bot.infinity_polling()
+        self._run_polling_forever()
