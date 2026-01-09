@@ -14,6 +14,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 
+# --- Ссылки на видео, которые бот отправляет В ГРУППУ по нажатию "Интересно" ---
+WATCH_LINKS = {
+    "s9_watch_solar_2_alt": "https://youtube.com/shorts/3m0MyZVbF_A?si=QFYQ2GSB0Bwi-Yys",
+}
+
+
 class MessageHandler:
     def __init__(self, token, config):
         # Инициализация бота (без webhook)
@@ -154,6 +160,25 @@ class MessageHandler:
             except Exception:
                 self.logger.exception("Failed to append to sheet")
 
+            # --- ВИДЕО-ССЫЛКА: если это спец-ключ и нажали первую кнопку (yes) ---
+            # Отправляем ссылку В ГРУППУ (ответом на исходное сообщение), чтобы не засорять чат.
+            if key in WATCH_LINKS and val == "yes":
+                url = WATCH_LINKS[key]
+                try:
+                    self.bot.send_message(
+                        call.message.chat.id,
+                        f"🎬 Видео по теме:\n{url}",
+                        reply_to_message_id=call.message.message_id
+                    )
+                    self.bot.answer_callback_query(call.id, "Ссылка отправлена ✅")
+                except Exception as e:
+                    self.logger.error(f"Failed to send link in group: {e}")
+                    try:
+                        self.bot.answer_callback_query(call.id, "Не получилось отправить ссылку 😅")
+                    except Exception:
+                        pass
+                return  # не шлём стандартную всплывашку ниже
+
             # --- ТИХИЙ РЕЖИМ ---
             # Только всплывающее уведомление. Сообщения в чат НЕ отправляем.
             try:
@@ -189,8 +214,10 @@ class MessageHandler:
                 text = str(e)
                 # Ошибка двойного запуска (409)
                 if "409" in text or "Conflict" in text:
-                    self.logger.error("409 Conflict: другой экземпляр бота сейчас получает обновления. "
-                                      "Ожидаю и пробую снова...")
+                    self.logger.error(
+                        "409 Conflict: другой экземпляр бота сейчас получает обновления. "
+                        "Ожидаю и пробую снова..."
+                    )
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 60)  # экспоненциальный бэкофф, максимум 60 сек
                     continue
