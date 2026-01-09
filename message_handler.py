@@ -115,6 +115,45 @@ class MessageHandler:
             except Exception as e:
                 self.logger.error(f"Failed for {group['name']}: {e}")
 
+    def send_watch_message(self):
+        """
+        Отправляет отдельное 'видео-сообщение' по расписанию watch_schedule.
+        Берём конкретное сообщение по ключу s9_watch_solar_2_alt
+        (или любое, где key есть в WATCH_LINKS).
+        """
+        messages = self.config.get("messages", [])
+        if not messages:
+            self.logger.warning("No messages found in config.")
+            return
+
+        # 1) Пытаемся найти сообщение с нужным ключом (самый надёжный вариант)
+        target_key = "s9_watch_solar_2_alt"
+        message = next((m for m in messages if m.get("key") == target_key), None)
+
+        # 2) Если вдруг ключ поменяешь — берём первое сообщение, которое есть в WATCH_LINKS
+        if message is None:
+            message = next((m for m in messages if m.get("key") in WATCH_LINKS), None)
+
+        if message is None:
+            self.logger.warning("No watch message found (key not found in config.json).")
+            return
+
+        text = (message.get("text") or "").strip()
+        if not text:
+            self.logger.warning("Watch message text is empty, skipping.")
+            return
+
+        key = message.get("key", "q")
+        buttons = message.get("buttons", [])
+        kb = self._inline_keyboard(key, buttons)
+
+        for group in self.config.get("groups", []):
+            try:
+                self.bot.send_message(group["id"], text, reply_markup=kb)
+                self.logger.info(f"Watch message sent to {group['name']}")
+            except Exception as e:
+                self.logger.error(f"Failed watch message for {group['name']}: {e}")
+
     # ---------------- Обработка ответов ----------------
     def _register_handlers(self):
 
@@ -197,7 +236,6 @@ class MessageHandler:
         """
         # На всякий случай отключаем webhook перед polling
         try:
-            # Без параметров (в некоторых версиях telebot нет drop_pending_updates)
             self.bot.remove_webhook()
             self.logger.info("Webhook removed (switching to polling).")
         except Exception as e:
@@ -206,35 +244,29 @@ class MessageHandler:
         backoff = 3  # начальная задержка между попытками
         while True:
             try:
-                # Основной бесконечный polling
                 self.logger.info("Starting infinity_polling...")
-                # Параметры таймаутов помогают пережить сетевые разрывы
                 self.bot.infinity_polling(timeout=60, long_polling_timeout=50)
             except ApiTelegramException as e:
                 text = str(e)
-                # Ошибка двойного запуска (409)
                 if "409" in text or "Conflict" in text:
                     self.logger.error(
                         "409 Conflict: другой экземпляр бота сейчас получает обновления. "
                         "Ожидаю и пробую снова..."
                     )
                     time.sleep(backoff)
-                    backoff = min(backoff * 2, 60)  # экспоненциальный бэкофф, максимум 60 сек
+                    backoff = min(backoff * 2, 60)
                     continue
-                # Любая другая ошибка Telegram API
                 self.logger.exception("Telegram API error. Will retry.")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
             except Exception:
-                # Сетевые и прочие ошибки
                 self.logger.exception("Unexpected error in polling. Will retry.")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
             else:
-                # Если infinity_polling завершился без исключения — небольшой перезапуск
                 self.logger.info("Polling finished gracefully. Restarting shortly...")
                 time.sleep(2)
-                backoff = 3  # сбрасываем бэкофф
+                backoff = 3
 
     # ---------------- Запуск ----------------
     def start(self):
