@@ -24,7 +24,7 @@ def main():
     # Планировщик (фоновый, чтобы параллельно работал polling)
     scheduler = BackgroundScheduler()
     cron_expr = config.get("schedule_interval", "0 9 * * *").split()
-
+    watch_cron = config.get("watch_schedule")
     if len(cron_expr) == 5:
         minute, hour, day, month, day_of_week = cron_expr
         scheduler.add_job(
