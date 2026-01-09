@@ -36,6 +36,23 @@ def main():
             month=month,
             day_of_week=day_of_week
         )
+        watch_cron = config.get("watch_schedule")
+
+if watch_cron:
+    watch_parts = watch_cron.split()
+
+    if len(watch_parts) == 5:
+        w_minute, w_hour, w_day, w_month, w_dow = watch_parts
+
+        scheduler.add_job(
+            handler.send_watch_message,
+            trigger="cron",
+            minute=w_minute,
+            hour=w_hour,
+            day=w_day,
+            month=w_month,
+            day_of_week=w_dow
+        )
     else:
         logger.error("Неверное cron-выражение в config.json")
         sys.exit(1)
