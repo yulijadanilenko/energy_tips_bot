@@ -16,7 +16,10 @@ from google.oauth2.service_account import Credentials
 
 # --- Ссылки на видео, которые бот отправляет В ГРУППУ по нажатию "Интересно" ---
 WATCH_LINKS = {
-    "s9_watch_solar_2_alt": "https://youtube.com/shorts/3m0MyZVbF_A?si=QFYQ2GSB0Bwi-Yys",
+    "watch_01": "https://youtu.be/nGTxUyHXszI?si=RIIypfk7rTF7Ah5R",
+    "watch_02": "https://youtube.com/shorts/csRk0m1TPT8?si=T24CA6xD6OLO86bd",
+    "watch_03": "https://youtu.be/VFonm5Tqf4M?si=me9ciA7cKbl0-OqZ",
+    "watch_04": "https://vm.tiktok.com/ZMDrSUtcm/"
 }
 
 
