@@ -1,7 +1,7 @@
 {
   "bot_token": "7821435288:AAEbkngMOlMNKwV_zDgzkCmJlKkTdHb3RrI",
   "schedule_interval": "0 13 * * wed",
-  "watch_schedule": "0 14 * * sat", 
+  "watch_schedule": "0 14 * * fri", 
   "groups": [
   { "id": "-1002519109332", "name": "energogymn_test" },
   { "id": "-1002782740061", "name": "7Б класс" },
