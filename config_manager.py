@@ -8,5 +8,5 @@ class ConfigManager:
     def load_config(self):
         if not os.path.exists(self.file):
             raise FileNotFoundError("config.json not found")
-        with open(self.file, "r") as f:
+        with open(self.file, "r", encoding="utf-8") as f:
             return json.load(f)
