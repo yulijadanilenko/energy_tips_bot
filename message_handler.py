@@ -1,277 +1,295 @@
-import os
+"""Пилот тренажёра «Свет без лишних затрат», 5–7 классы.
+
+Совместим с прежним main.py. /start или /train — личная тренировка.
+Рассылки прежнего main.py намеренно отключены на время пилота.
+Прогресс хранится в памяти до перезапуска. Ответы, если доступно,
+пишутся в существующий лист Responses; старые строки не изменяются.
+"""
 import json
-import time
 import logging
-import random
-from datetime import datetime
+import os
+import uuid
+from datetime import datetime, timezone
 
-import telebot
-from telebot import types
-from telebot.apihelper import ApiTelegramException
-
-# gspread + google-auth для Google Sheets
 import gspread
+import telebot
 from google.oauth2.service_account import Credentials
+from telebot import types
 
 
-# --- Ссылки на видео, которые бот отправляет В ГРУППУ по нажатию "Интересно" ---
-WATCH_LINKS = {
-    "watch_01": "https://youtu.be/nGTxUyHXszI?si=RIIypfk7rTF7Ah5R",
-    "watch_02": "https://youtube.com/shorts/csRk0m1TPT8?si=T24CA6xD6OLO86bd",
-    "watch_03": "https://youtu.be/VFonm5Tqf4M?si=me9ciA7cKbl0-OqZ",
-    "watch_04": "https://vm.tiktok.com/ZMDrSUtcm/"
-}
+QUESTIONS = [
+    {
+        "key": "light_entry",
+        "stage": "Входное задание",
+        "text": "В классе солнечно. Свет у окон выключили, но у доски стало трудно читать записи. Как поступить?",
+        "options": ["Выключить весь свет ради экономии", "Включить свет там, где его недостаточно", "Оставить всё как есть"],
+        "correct": 1,
+        "explanation": "Экономия не должна мешать хорошо видеть. Нужное освещение сохраняем, лишнее выключаем. В классе решение об освещении принимаем вместе с учителем.",
+    },
+    {
+        "key": "light_practice_1",
+        "stage": "Тренировка · 1 из 2",
+        "text": "Ты читаешь за столом. За окном стемнело, буквы стало плохо видно. Как поступить?",
+        "options": ["Продолжать читать в полумраке", "Включить весь свет в квартире", "Включить подходящий свет у рабочего места"],
+        "correct": 2,
+        "hint": "Нужен свет там, где ты читаешь. Подумай, какой вариант обеспечивает видимость без лишнего освещения.",
+        "explanation": "Освещаем рабочее место так, чтобы текст был хорошо виден. Если настольной лампы недостаточно, добавляем общее освещение.",
+    },
+    {
+        "key": "light_practice_2",
+        "stage": "Тренировка · 2 из 2",
+        "text": "Ты уходишь из комнаты надолго. Свет включён, но младшая сестра остаётся собирать пазл. Что сделаешь?",
+        "options": ["Оставлю необходимый ей свет", "Выключу свет: я ведь ухожу", "Попрошу собирать пазл в темноте"],
+        "correct": 0,
+        "hint": "В комнате остаётся человек, которому нужно хорошо видеть. Учти не только свои действия, но и его занятие.",
+        "explanation": "Перед выключением света проверяем, нужен ли он другим. Экономим только там, где освещение действительно лишнее.",
+    },
+    {
+        "key": "light_final",
+        "stage": "Итоговое задание",
+        "text": "Дома включён свет в пустой комнате и над столом, где брат рисует. В пустую комнату пока никто не собирается. Как разумнее поступить?",
+        "options": ["Выключить свет в обеих комнатах", "Выключить в пустой, сохранить нужный свет у стола", "Оставить весь свет до вечера"],
+        "correct": 1,
+        "explanation": "Свет в пустой комнате можно выключить, а необходимое освещение рабочего места сохранить. Это экономия с учётом потребностей людей.",
+    },
+]
 
 
 class MessageHandler:
     def __init__(self, token, config):
-        # Инициализация бота (без webhook)
-        self.bot = telebot.TeleBot(token)
+        # Последовательная обработка исключает одновременный учёт двух нажатий.
+        self.bot = telebot.TeleBot(token, threaded=False)
         self.config = config
         self.logger = logging.getLogger("telegram_bot")
-
-        # (chat_id, message_id, user_id) — защита от повторных ответов одним человеком
-        self._answered = set()
-
-        # ---------- Инициализация Google Sheets ----------
-        self.gc = None
+        self.sessions = {}
         self.sheet = None
-        try:
-            creds_json = os.getenv("GOOGLE_CREDENTIALS", "")
-            spreadsheet_id = os.getenv("SPREADSHEET_ID", "")
-
-            # Отладка окружения
-            self.logger.info(
-                f"ENV check: creds_len={len(creds_json)}, sheet_id_head={spreadsheet_id[:8]}"
-            )
-
-            if creds_json and spreadsheet_id:
-                info = json.loads(creds_json)
-
-                scopes = [
-                    "https://www.googleapis.com/auth/spreadsheets",
-                    "https://www.googleapis.com/auth/drive",
-                ]
-                creds = Credentials.from_service_account_info(info, scopes=scopes)
-                self.gc = gspread.authorize(creds)
-
-                sh = self.gc.open_by_key(spreadsheet_id)
-                try:
-                    self.sheet = sh.worksheet("Responses")
-                except gspread.exceptions.WorksheetNotFound:
-                    self.sheet = sh.add_worksheet(title="Responses", rows="1000", cols="20")
-                    self.sheet.append_row(
-                        ["timestamp", "chat_title", "chat_id", "user", "user_id",
-                         "question_key", "answer_value", "message_id"],
-                        value_input_option="USER_ENTERED"
-                    )
-
-                self.logger.info(f"Google Sheets OK as {info.get('client_email')}")
-            else:
-                self.logger.warning(
-                    "GOOGLE_CREDENTIALS or SPREADSHEET_ID not set – answers won't be saved to Sheets."
-                )
-        except Exception:
-            self.logger.exception("Failed to init Google Sheets")
-
+        self._init_sheet()
         self._register_handlers()
 
-    # ---------------- Создание кнопок ----------------
-    def _inline_keyboard(self, key, buttons):
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        if not buttons:
-            return kb
-
-        inline_buttons = []
-        for i, label in enumerate(buttons):
-            data = f"answer:{key}:{'yes' if i == 0 else 'no'}"
-            inline_buttons.append(types.InlineKeyboardButton(label, callback_data=data))
-
-        if len(inline_buttons) == 1:
-            inline_buttons.append(
-                types.InlineKeyboardButton("🤔 Пока нет", callback_data=f"answer:{key}:no")
+    def _init_sheet(self):
+        raw = os.getenv("GOOGLE_CREDENTIALS", "").strip()
+        spreadsheet_id = os.getenv("SPREADSHEET_ID", "").strip()
+        if not raw or not spreadsheet_id:
+            self.logger.warning("Google Sheets не настроены; пилот работает без записи ответов.")
+            return
+        try:
+            credentials = Credentials.from_service_account_info(
+                json.loads(raw), scopes=["https://www.googleapis.com/auth/spreadsheets"]
             )
-        kb.add(*inline_buttons)
+            book = gspread.authorize(credentials).open_by_key(spreadsheet_id)
+            try:
+                self.sheet = book.worksheet("Responses")
+            except gspread.exceptions.WorksheetNotFound:
+                self.sheet = book.add_worksheet(title="Responses", rows=1000, cols=20)
+                self.sheet.append_row(
+                    ["timestamp", "chat_title", "chat_id", "user", "user_id",
+                     "question_key", "answer_value", "message_id"],
+                    value_input_option="RAW",
+                )
+        except Exception as exc:
+            self.sheet = None
+            self.logger.warning("Google Sheets недоступны (%s).", type(exc).__name__)
+
+    def _save(self, call, session, key, payload):
+        if self.sheet is None:
+            session["saved"] = False
+            return
+        payload = dict(payload, session_id=session["id"], module="light_v1")
+        try:
+            self.sheet.append_row([
+                datetime.now(timezone.utc).isoformat(), "Личная тренировка",
+                call.message.chat.id, "", call.from_user.id, key,
+                json.dumps(payload, ensure_ascii=False), call.message.message_id,
+            ], value_input_option="RAW")
+        except Exception as exc:
+            session["saved"] = False
+            self.logger.warning("Ответ не записан в Sheets (%s).", type(exc).__name__)
+
+    def _keyboard(self, session, actions):
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for label, action, value in actions:
+            kb.add(types.InlineKeyboardButton(
+                label, callback_data=f"t:{session['id']}:{session['rev']}:{action}:{value}"
+            ))
         return kb
 
-    # ---------------- Отправка сообщений ----------------
+    def _show(self, chat_id, session):
+        phase = session["phase"]
+        if phase == "welcome":
+            text = (
+                "💡 Свет без лишних затрат\nТренажёр для 5–7 классов · около 5 минут\n\n"
+                "Ты потренируешься решать, где свет нужен, а где его можно выключить. "
+                "Сначала — задача без подсказки, затем объяснение, тренировка и итог.\n\n"
+                "Если подключена таблица, бот записывает твой Telegram ID и ответы для анализа. "
+                "Имя не записывается. В этом пилоте после перезапуска бота придётся начать заново."
+            )
+            actions = [("Начать", "begin", "0")]
+        elif phase == "question":
+            question = QUESTIONS[session["index"]]
+            text = f"{question['stage']}\n\n{question['text']}"
+            if session.get("hint"):
+                text += "\n\nПопробуй ещё раз. " + question["hint"]
+            actions = [(label, "answer", str(i)) for i, label in enumerate(question["options"])]
+        elif phase == "feedback":
+            text = session["feedback"]
+            actions = [("Дальше", "next", "0")]
+        elif phase == "observation":
+            text = (
+                "🔎 Наблюдение в жизни\n\nОсмотрись там, где ты сейчас находишься. "
+                "Есть ли включённый свет, который никому не нужен?\n\n"
+                "Пока только наблюдай. В школе обсуди вывод с учителем, дома — со взрослым. "
+                "Не трогай лампы, провода и розетки.\n\n"
+                "Здесь нет правильного ответа — отметь, что удалось заметить."
+            )
+            actions = [("Да, заметил(а) лишний свет", "observe", "extra"),
+                       ("Нет, включённый свет нужен", "observe", "needed"),
+                       ("Сейчас не могу проверить", "observe", "skip")]
+        else:
+            entry = "верно" if session["first"][0] else "пока неверно"
+            final = "верно" if session["first"][3] else "пока неверно"
+            practice = sum(bool(session["first"][i]) for i in (1, 2))
+            text = (
+                f"🏁 Модуль завершён!\n\nВходное задание: {entry}.\n"
+                f"Тренировочные задачи с первой попытки: {practice} из 2.\n"
+                f"Итоговое задание: {final}.\n\n"
+                "Главное правило: сохраняем свет там, где он нужен людям, и выключаем лишний.\n"
+                "Это результат короткой тренировки, а не школьная отметка."
+            )
+            if not session["first"][3]:
+                text += "\nСтоит ещё раз разобрать итоговую ситуацию и повторить модуль."
+            if session["saved"]:
+                text += "\n\nОтветы записаны в таблицу."
+            else:
+                text += "\n\nНе все ответы удалось записать в таблицу. Результат показан здесь."
+            actions = []
+        kb = self._keyboard(session, actions) if actions else None
+        if session.get("message_id"):
+            self.bot.edit_message_text(text, chat_id=chat_id,
+                                       message_id=session["message_id"], reply_markup=kb)
+        else:
+            sent = self.bot.send_message(chat_id, text, reply_markup=kb)
+            session["message_id"] = sent.message_id
+
+    def _begin_session(self, message):
+        if message.chat.type != "private":
+            self.bot.reply_to(message, "Открой личный чат с ботом и отправь /train. У каждого будет своя тренировка.")
+            return
+        session = {
+            "id": uuid.uuid4().hex[:12], "rev": 0, "phase": "welcome", "index": 0,
+            "attempts": [0] * 4, "first": [None] * 4, "saved": self.sheet is not None,
+            "message_id": None, "hint": False,
+        }
+        self.sessions[message.from_user.id] = session
+        self._show(message.chat.id, session)
+
+    def _advance(self, session, action, value):
+        """Проверяет действие и меняет состояние. Возвращает событие для записи."""
+        phase = session["phase"]
+        event = None
+        if phase == "welcome" and action == "begin" and value == "0":
+            session["phase"] = "question"
+        elif phase == "question" and action == "answer":
+            question = QUESTIONS[session["index"]]
+            if value not in {str(i) for i in range(len(question["options"]))}:
+                raise ValueError("Недопустимый ответ")
+            choice = int(value)
+            index = session["index"]
+            session["attempts"][index] += 1
+            correct = choice == question["correct"]
+            if session["first"][index] is None:
+                session["first"][index] = correct
+            event = (question["key"], {
+                "choice": choice, "label": question["options"][choice],
+                "correct": correct, "attempt": session["attempts"][index],
+                "stage": question["stage"],
+            })
+            if index in (1, 2) and not correct:
+                session["hint"] = True
+            else:
+                session["hint"] = False
+                session["phase"] = "feedback"
+                prefix = "Верно! " if correct else "Разберём решение. "
+                session["feedback"] = prefix + question["explanation"]
+        elif phase == "feedback" and action == "next" and value == "0":
+            if session["index"] == 2:
+                session["phase"] = "observation"
+            elif session["index"] == 3:
+                session["phase"] = "done"
+                event = ("light_summary", {"first_correct": session["first"],
+                                            "attempts": session["attempts"]})
+            else:
+                session["index"] += 1
+                session["phase"] = "question"
+        elif phase == "observation" and action == "observe" and value in {"extra", "needed", "skip"}:
+            event = ("light_observation", {"observation": value})
+            session["index"] = 3
+            session["phase"] = "question"
+        else:
+            raise ValueError("Действие не соответствует этапу")
+        session["rev"] += 1
+        return event
+
+    def _on_callback(self, call):
+        if not call.message or call.message.chat.type != "private":
+            self.bot.answer_callback_query(call.id, "Тренировка доступна в личном чате: /train")
+            return
+        session = self.sessions.get(call.from_user.id)
+        try:
+            prefix, session_id, revision, action, value = call.data.split(":")
+            valid = (prefix == "t" and session is not None
+                     and session_id == session["id"] and revision == str(session["rev"])
+                     and call.message.message_id == session["message_id"])
+        except (ValueError, AttributeError):
+            valid = False
+        if not valid:
+            self.bot.answer_callback_query(call.id, "Кнопка устарела. Продолжить: /continue. Начать заново: /train")
+            return
+        try:
+            event = self._advance(session, action, value)
+        except ValueError:
+            self.bot.answer_callback_query(call.id, "Этот вариант недоступен.")
+            return
+        # Подтверждаем получение, а не сохранение: запись в Sheets ещё впереди.
+        try:
+            self.bot.answer_callback_query(call.id, "Ответ принят")
+        except Exception:
+            pass
+        if event:
+            self._save(call, session, *event)
+        try:
+            self._show(call.message.chat.id, session)
+        except Exception as exc:
+            self.logger.warning("Не удалось обновить карточку (%s).", type(exc).__name__)
+            self.bot.send_message(call.message.chat.id, "Не удалось обновить карточку. Отправь /continue.")
+
+    def _register_handlers(self):
+        self.bot.message_handler(commands=["start", "train"])(self._begin_session)
+        self.bot.callback_query_handler(func=lambda c: bool(c.data and c.data.startswith("t:")))(self._on_callback)
+
+        @self.bot.message_handler(commands=["continue"])
+        def resume(message):
+            if message.chat.type != "private":
+                self.bot.reply_to(message, "Продолжай тренировку в личном чате с ботом.")
+                return
+            session = self.sessions.get(message.from_user.id)
+            if session is None:
+                self._begin_session(message)
+            else:
+                # Новая карточка; кнопки старой отклоняются по message_id.
+                session["message_id"] = None
+                self._show(message.chat.id, session)
+
+        @self.bot.callback_query_handler(func=lambda c: bool(c.data and c.data.startswith("answer:")))
+        def old_button(call):
+            self.bot.answer_callback_query(call.id, "Это прежняя рассылка. Для тренажёра отправь /train в личном чате.")
+
     def send_daily_message(self):
-        messages = self.config.get("messages", [])
-        if not messages:
-            self.logger.warning("No messages found in config.")
-            return
-
-        message = random.choice(messages)
-        text = (message.get("text") or "").strip()
-        if not text:
-            self.logger.warning("Empty message text, skipping.")
-            return
-
-        key = message.get("key", "q")
-        buttons = message.get("buttons", [])
-        kb = self._inline_keyboard(key, buttons)
-
-        for group in self.config.get("groups", []):
-            try:
-                self.bot.send_message(group["id"], text, reply_markup=kb)
-                self.logger.info(f"Sent to {group['name']}")
-            except Exception as e:
-                self.logger.error(f"Failed for {group['name']}: {e}")
+        self.logger.info("Пилот: автоматическая рассылка отключена. Запуск вручную: /train.")
 
     def send_watch_message(self):
-        """
-        Отправляет отдельное 'видео-сообщение' по расписанию watch_schedule.
-        Берём конкретное сообщение по ключу s9_watch_solar_2_alt
-        (или любое, где key есть в WATCH_LINKS).
-        """
-        messages = self.config.get("messages", [])
-        if not messages:
-            self.logger.warning("No messages found in config.")
-            return
+        self.logger.info("Пилот: автоматическая рассылка видео отключена.")
 
-        # 1) Пытаемся найти сообщение с нужным ключом (самый надёжный вариант)
-        target_key = "s9_watch_solar_2_alt"
-        message = next((m for m in messages if m.get("key") == target_key), None)
-
-        # 2) Если вдруг ключ поменяешь — берём первое сообщение, которое есть в WATCH_LINKS
-        if message is None:
-            message = next((m for m in messages if m.get("key") in WATCH_LINKS), None)
-
-        if message is None:
-            self.logger.warning("No watch message found (key not found in config.json).")
-            return
-
-        text = (message.get("text") or "").strip()
-        if not text:
-            self.logger.warning("Watch message text is empty, skipping.")
-            return
-
-        key = message.get("key", "q")
-        buttons = message.get("buttons", [])
-        kb = self._inline_keyboard(key, buttons)
-
-        for group in self.config.get("groups", []):
-            try:
-                self.bot.send_message(group["id"], text, reply_markup=kb)
-                self.logger.info(f"Watch message sent to {group['name']}")
-            except Exception as e:
-                self.logger.error(f"Failed watch message for {group['name']}: {e}")
-
-    # ---------------- Обработка ответов ----------------
-    def _register_handlers(self):
-
-        @self.bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("answer:"))
-        def _on_answer(call: types.CallbackQuery):
-            # --- разбираем данные коллбэка ---
-            try:
-                _, key, val = call.data.split(":")
-            except Exception:
-                try:
-                    self.bot.answer_callback_query(call.id, "Ошибка данных")
-                finally:
-                    return
-
-            # --- защита от повторного ответа одним пользователем на тот же вопрос ---
-            answered_key = (call.message.chat.id, call.message.message_id, call.from_user.id)
-            if answered_key in self._answered:
-                self.bot.answer_callback_query(call.id, "Вы уже отвечали 👍")
-                return
-            self._answered.add(answered_key)
-
-            # --- запись в Google Sheets (если подключено) ---
-            try:
-                if self.sheet:
-                    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                    chat_title = getattr(call.message.chat, "title", "") or (call.message.chat.username or "")
-                    user_name = (call.from_user.full_name or "").strip()
-
-                    row = [
-                        ts,
-                        chat_title,
-                        call.message.chat.id,
-                        user_name,
-                        call.from_user.id,
-                        key,
-                        val,
-                        call.message.message_id,
-                    ]
-                    self.sheet.append_row(row, value_input_option="USER_ENTERED")
-                    self.logger.info(f"Sheet append OK: {row[:4]} ...")
-                else:
-                    self.logger.warning("Sheet is not initialized; skipping append.")
-            except Exception:
-                self.logger.exception("Failed to append to sheet")
-
-            # --- ВИДЕО-ССЫЛКА: если это спец-ключ и нажали первую кнопку (yes) ---
-            # Отправляем ссылку В ГРУППУ (ответом на исходное сообщение), чтобы не засорять чат.
-            if key in WATCH_LINKS and val == "yes":
-                url = WATCH_LINKS[key]
-                try:
-                    self.bot.send_message(
-                        call.message.chat.id,
-                        f"🎬 Видео по теме:\n{url}",
-                        reply_to_message_id=call.message.message_id
-                    )
-                    self.bot.answer_callback_query(call.id, "Ссылка отправлена ✅")
-                except Exception as e:
-                    self.logger.error(f"Failed to send link in group: {e}")
-                    try:
-                        self.bot.answer_callback_query(call.id, "Не получилось отправить ссылку 😅")
-                    except Exception:
-                        pass
-                return  # не шлём стандартную всплывашку ниже
-
-            # --- ТИХИЙ РЕЖИМ ---
-            # Только всплывающее уведомление. Сообщения в чат НЕ отправляем.
-            try:
-                self.bot.answer_callback_query(call.id, "Ответ сохранён ✅")
-            except Exception as e:
-                self.logger.error(f"Error in answer_callback_query: {e}")
-
-            # Клавиатуру НЕ убираем — другие участники тоже могут ответить.
-
-    # ---------------- Надёжный запуск polling ----------------
-    def _run_polling_forever(self):
-        """
-        Запускает infinity_polling в бесконечном цикле.
-        Если случился 409 Conflict (или сетевые проблемы),
-        аккуратно ждём и пробуем снова.
-        """
-        # На всякий случай отключаем webhook перед polling
-        try:
-            self.bot.remove_webhook()
-            self.logger.info("Webhook removed (switching to polling).")
-        except Exception as e:
-            self.logger.warning(f"remove_webhook failed: {e}")
-
-        backoff = 3  # начальная задержка между попытками
-        while True:
-            try:
-                self.logger.info("Starting infinity_polling...")
-                self.bot.infinity_polling(timeout=60, long_polling_timeout=50)
-            except ApiTelegramException as e:
-                text = str(e)
-                if "409" in text or "Conflict" in text:
-                    self.logger.error(
-                        "409 Conflict: другой экземпляр бота сейчас получает обновления. "
-                        "Ожидаю и пробую снова..."
-                    )
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
-                    continue
-                self.logger.exception("Telegram API error. Will retry.")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-            except Exception:
-                self.logger.exception("Unexpected error in polling. Will retry.")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-            else:
-                self.logger.info("Polling finished gracefully. Restarting shortly...")
-                time.sleep(2)
-                backoff = 3
-
-    # ---------------- Запуск ----------------
     def start(self):
-        self.logger.info("Бот запущен и готов к приёму сообщений.")
-        self._run_polling_forever()
+        self.bot.remove_webhook()
+        self.logger.info("Пилот тренажёра запущен. Команды: /start, /train, /continue.")
+        self.bot.infinity_polling(timeout=60, long_polling_timeout=50)
