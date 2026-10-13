@@ -1,5 +1,4 @@
 {
-  "bot_token": "7821435288:AAEbkngMOlMNKwV_zDgzkCmJlKkTdHb3RrI",
   "schedule_interval": "0 13 * * wed",
   "watch_schedule": "0 14 * * fri", 
   "groups": [
