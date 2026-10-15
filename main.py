@@ -23,6 +23,5 @@ def main():
     logger.info("Запуск тренажёра. Начать тренировку: /train.")
     handler.start()
 
-
-if name == "main":
-    main()
+if __name__ == "__main__":
+    main() 
