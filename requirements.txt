@@ -1,4 +1,4 @@
-pyTelegramBotAPI
-apscheduler
-gspread
-google-auth
+pyTelegramBotAPI==4.37.1
+gspread==6.2.1
+google-auth==2.62.0
+requests==2.34.2
