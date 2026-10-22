@@ -147,10 +147,15 @@ def advance(s, action, value):
                 a['index'] += 1
         elif a['id'].startswith('m') and i in (1,2) and not correct:
             a['hint'] = True
+            a['last_choice'] = choice
+            s['screen'] = 'retry'
         else:
             a['hint'] = False
             a['feedback'] = ('Верно! ' if correct else 'Давай разберёмся. ') + question['explanation']
             s['screen'] = 'feedback'
+    elif action == 'retry' and screen == 'retry':
+        s['active']['hint'] = False
+        s['screen'] = 'question'
     elif action == 'next' and screen == 'feedback':
         a = s['active']
         if a['id'].startswith('r') or a['index'] == 3:
@@ -198,7 +203,7 @@ def advance(s, action, value):
         event['event'] = 'test_reset'
     else:
         raise ValueError('Действие недоступно')
-    if s.get('active') and s['screen'] in ('support','welcome','question','feedback','rule','observation','observation_feedback'):
+    if s.get('active') and s['screen'] in ('support','welcome','question','retry','feedback','rule','observation','observation_feedback'):
         s['active']['phase'] = s['screen']
     s['last_interaction'] = now()
     s['rev'] += 1
@@ -211,7 +216,7 @@ def render(s):
     def add(label, action, value='0'):
         actions.append((label, action, value))
     if screen == 'intro':
-        text = ('⚡ Тренажёр энергосбережения для 5–7 классов\n\n'
+        text = ('⚡ Тренажёр энергосбережения для 4–7 классов\n\n'
                 'Четыре короткие тренировки помогут выбирать разумные действия дома и в гимназии. '
                 'Сначала — стартовая проверка, затем занятия, повторы и итог. Это не школьная отметка.\n\n'
                 'Сохраняются Telegram ID, выбранный класс, ответы и прогресс. Имя не записывается. '
@@ -279,6 +284,12 @@ def render(s):
         # Короткие кнопки не обрезают длинные ответы на телефоне.
         for i in range(len(q['options'])):
             add('АБВГ'[i], 'answer', str(i))
+    elif screen == 'retry':
+        a = s['active']; q = questions(a['id'])[a['index']]
+        text = (f"Пока неверно. Попытка {a['attempts'][a['index']]}.\n\n"
+                f"Твой ответ: {q['options'][a['last_choice']]}\n\n"
+                '💡 Подсказка: ' + q['hint'] + '\n\nПрочитай подсказку и попробуй ещё раз.')
+        add('Попробовать ещё раз', 'retry')
     elif screen == 'feedback':
         text = s['active']['feedback']; add('Дальше','next')
     elif screen in ('rule','rule_view'):
@@ -308,6 +319,9 @@ def render(s):
                     f"Тренировочные с первой попытки: {sum(r['first'][1:3])} из 2.\n"
                     f"Итоговая: {'верно' if r['first'][3] else 'стоит повторить правило'}.\n\n"
                     'Ответы сохранены. Повторение откроется через три дня после завершения модуля.')
+            if s['class_code'] == 'test':
+                text = text.replace('Повторение откроется через три дня после завершения модуля.',
+                                    'В тестовом режиме повторение доступно сразу через меню.')
             add('Посмотреть правило','rule_show')
         add('В меню','menu')
     elif screen == 'review':
@@ -323,6 +337,8 @@ def render(s):
         text = 'Спасибо! Попробуй вспомнить об этом решении в подходящей ситуации.'; add('В меню','menu')
     else:
         raise ValueError('Неизвестный экран')
+    if s.get('enrolled_at') and screen in ('support','question','retry','feedback','rule','observation','observation_feedback'):
+        add('В меню · продолжить позже', 'menu')
     return text, actions
 
 
@@ -443,15 +459,15 @@ class MessageHandler:
             if len(data.encode()) > 64:
                 raise ValueError('Слишком длинный callback')
             kb.add(types.InlineKeyboardButton(label,callback_data=data))
+        # Новый экран появляется внизу чата: обратная связь не теряется выше.
         mid = self.cards.get(uid)
-        if mid:
-            try:
-                self.bot.edit_message_text(text,chat_id=uid,message_id=mid,reply_markup=kb)
-                return
-            except Exception:
-                pass
         sent = self.bot.send_message(uid,text,reply_markup=kb)
         self.cards[uid] = sent.message_id
+        if mid:
+            try:
+                self.bot.edit_message_reply_markup(chat_id=uid,message_id=mid,reply_markup=None)
+            except Exception:
+                self.logger.info('Не удалось убрать прежние кнопки.')
 
     def failure(self, uid, exc):
         self.logger.warning('Операция не завершена: %s',type(exc).__name__)
@@ -478,7 +494,6 @@ class MessageHandler:
                 s['last_interaction'] = now()
                 s['rev'] += 1
                 self.journal.commit(uid,s,{'event':'resume' if previous else 'registration_started'})
-                self.cards.pop(uid,None)
                 self.show(uid,s)
             except Exception as exc:
                 self.failure(uid,exc)
@@ -499,7 +514,11 @@ class MessageHandler:
                 parts = call.data.split(':')
                 current = self.journal.states.get(uid)
                 if len(parts) != 5 or not current or parts[1] != current['id'] or parts[2] != str(current['rev']):
-                    self.bot.send_message(uid,'Эта кнопка устарела. Открой текущий шаг: /continue')
+                    if current:
+                        self.cards[uid] = call.message.message_id
+                        self.show(uid, current)
+                    else:
+                        self.bot.send_message(uid,'Открой тренировку командой /start.')
                     return
                 s = copy.deepcopy(current)
                 event = advance(s,parts[3],parts[4])
