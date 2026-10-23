@@ -96,9 +96,13 @@ def advance(s, action, value):
         if value == 'no':
             s['class_code'], s['screen'] = None, 'class'
         else:
-            s['screen'] = 'notice_choice'
+            s['notifications'] = s.get('notification_preference', s['class_code'] != 'test')
+            s['enrolled_at'] = now()
+            event['event'] = 'enrollment'
+            s['screen'] = 'menu'
     elif action == 'notify' and screen in ('notice_choice','settings') and value in ('on','off'):
         s['notifications'] = value == 'on'
+        s['notification_preference'] = s['notifications']
         if s['enrolled_at'] is None:
             s['enrolled_at'] = now()
             event['event'] = 'enrollment'
@@ -106,6 +110,7 @@ def advance(s, action, value):
     elif action in ('progress','settings') and screen == 'menu':
         s['screen'] = action
     elif action == 'change_class' and screen == 'settings' and not s['active'] and not s['results']:
+        s.setdefault('notification_preference', s['notifications'])
         s['enrolled_at'] = None
         s['screen'] = 'class'
     elif action == 'open' and screen == 'menu':
@@ -220,7 +225,9 @@ def render(s):
                 'Четыре короткие тренировки помогут выбирать разумные действия дома и в гимназии. '
                 'Сначала — стартовая проверка, затем занятия, повторы и итог. Это не школьная отметка.\n\n'
                 'Сохраняются Telegram ID, выбранный класс, ответы и прогресс. Имя не записывается. '
-                'Результаты доступны организатору проекта. Продолжить позже можно командой /continue.')
+                'Результаты доступны организатору проекта. Продолжить позже можно командой /continue.\n\n'
+                'После регистрации напоминания включены: до двух сообщений в неделю с 16:00 до 19:00 по Минску. '
+                'Отключить их можно в настройках. В режиме «Тестирование» рассылки нет.')
         add('Продолжить','intro')
     elif screen == 'class':
         text = 'Выбери класс. Взрослым для проверки бота — «Тестирование».'
@@ -228,10 +235,12 @@ def render(s):
             add(name, 'class', code)
     elif screen == 'confirm':
         text = f"Твой выбор: {CLASSES[s['class_code']]}. Всё верно?"
+        if 'notification_preference' not in s and s['class_code'] != 'test':
+            text += '\n\nНапоминания включатся после подтверждения: до двух сообщений в неделю, с 16:00 до 19:00 по Минску. Отключить их можно в настройках.'
         add('Да, всё верно','confirm','yes'); add('Выбрать другой','confirm','no')
     elif screen == 'notice_choice':
-        text = 'Присылать приглашения на задания? Не более двух в неделю, днём. Их можно отключить в настройках. Задания доступны и без приглашений.'
-        add('Да, приглашать','notify','on'); add('Без приглашений','notify','off')
+        text = 'После регистрации напоминания включены: до двух сообщений в неделю с 16:00 до 19:00 по Минску. Отключить их можно в настройках. В режиме «Тестирование» рассылки нет.'
+        add('Продолжить','notify','off' if s['class_code'] == 'test' else 'on')
     elif screen == 'menu':
         a = next_activity(s)
         text = f"⚡ Моя тренировка\nКласс: {CLASSES[s['class_code']]}\n\n"
