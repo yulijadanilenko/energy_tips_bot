@@ -433,6 +433,62 @@ class Journal:
                         self.queue.task_done()
 
 
+class DeliveryJournal:
+    """Отдельный постоянный журнал отправок; учебный прогресс не меняется."""
+    HEADERS = ['event_id', 'timestamp_utc', 'day_minsk', 'kind', 'recipient',
+               'attempt_id', 'status', 'activity', 'error_type']
+
+    def __init__(self, book):
+        self.lock = threading.RLock()
+        try:
+            self.sheet = book.worksheet('Delivery_log')
+        except gspread.exceptions.WorksheetNotFound:
+            self.sheet = book.add_worksheet(title='Delivery_log', rows=5000, cols=9)
+            self.sheet.append_row(self.HEADERS, value_input_option='RAW')
+        values = self.sheet.get_all_values()
+        if not values or values[0] != self.HEADERS:
+            raise ValueError('Неверные заголовки Delivery_log')
+        self.rows = values[1:]
+
+    def record(self, day, kind, uid, attempt, status, activity='', error=''):
+        row = [uuid.uuid4().hex, datetime.now(timezone.utc).isoformat(), day,
+               kind, str(uid), attempt, status, activity, error]
+        with self.lock:
+            try:
+                self.sheet.append_row(row, value_input_option='RAW')
+            except Exception:
+                # При неоднозначном ответе Google проверяем факт сохранения.
+                self.rows = self.sheet.get_all_values()[1:]
+                if not any(r and r[0] == row[0] for r in self.rows):
+                    raise
+            else:
+                self.rows.append(row)
+
+    def snapshot(self):
+        with self.lock:
+            return [r[:] for r in self.rows]
+
+
+def delivery_report(rows, day):
+    attempts = {}
+    for r in rows:
+        if len(r) >= 7 and r[2] == day and r[3] == 'reminder':
+            attempts[r[5]] = r
+    counts = {status: sum(r[6] == status for r in attempts.values())
+              for status in ('sent', 'failed', 'unknown', 'reserved')}
+    uncertain = counts['unknown'] + counts['reserved']
+    return ('📬 Отчёт о напоминаниях за ' + datetime.fromisoformat(day).strftime('%d.%m.%Y')
+            + ' (Минск)\n\n'
+            + f"Попыток отправки: {len(attempts)}\n"
+            + f"Telegram подтвердил отправку: {counts['sent']}\n"
+            + f"Ошибок с отказом Telegram: {counts['failed']}\n"
+            + f"Результат не подтверждён: {uncertain}\n\n"
+            + ('Сегодня напоминания не отправлялись.\n' if not attempts else '')
+            + 'Учитываются отправки после установки отчёта. '
+            + 'Подтверждение отправки не означает прочтение.\n'
+            + 'Прогресс участников: /admin')
+
+
 class MessageHandler:
     def __init__(self, token, config=None):
         self.logger = logging.getLogger('telegram_bot')
@@ -443,11 +499,14 @@ class MessageHandler:
         credentials = Credentials.from_service_account_info(json.loads(raw), scopes=['https://www.googleapis.com/auth/spreadsheets'])
         client = gspread.authorize(credentials)
         client.set_timeout(25)
-        self.journal = Journal(client.open_by_key(os.environ['SPREADSHEET_ID'].strip()))
+        book = client.open_by_key(os.environ['SPREADSHEET_ID'].strip())
+        self.journal = Journal(book)
+        self.deliveries = DeliveryJournal(book)
+        self.report_lock = threading.RLock()
         self.admins = {int(x.strip()) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip()}
         self.cards = {}
         self.bot.message_handler(commands=['start','train','continue','menu','restart'])(self.command)
-        self.bot.message_handler(commands=['admin','myid','links'])(self.admin)
+        self.bot.message_handler(commands=['admin','myid','links','report'])(self.admin)
         self.bot.callback_query_handler(func=lambda c: bool(c.data and c.data.startswith('v2:')))(self.callback)
         self.bot.callback_query_handler(func=lambda c: True)(self.old_button)
 
@@ -552,6 +611,17 @@ class MessageHandler:
         if uid not in self.admins:
             self.bot.send_message(uid,'Сводка доступна организатору проекта.')
             return
+        if message.text.split()[0].split('@')[0] == '/report':
+            try:
+                parts = message.text.split()
+                day = parts[1] if len(parts) > 1 else datetime.now(ZoneInfo('Europe/Minsk')).date().isoformat()
+                datetime.strptime(day, '%Y-%m-%d')
+                self.bot.send_message(uid, delivery_report(self.deliveries.snapshot(), day))
+            except ValueError:
+                self.bot.send_message(uid, 'Отправь /report или /report ГГГГ-ММ-ДД.')
+            except Exception as exc:
+                self.failure(uid, exc)
+            return
         if message.text.split('@')[0] == '/links':
             name = self.bot.get_me().username
             links = [f'{label}: https://t.me/{name}?start={code}' for code,label in CLASSES.items()]
@@ -572,32 +642,65 @@ class MessageHandler:
             except Exception as exc:
                 self.failure(uid,exc)
 
+    def tracked_send(self, day, kind, uid, text, activity='', **kwargs):
+        attempt = uuid.uuid4().hex
+        self.deliveries.record(day, kind, uid, attempt, 'reserved', activity)
+        try:
+            self.bot.send_message(uid, text, **kwargs)
+        except telebot.apihelper.ApiTelegramException as exc:
+            # Явный ответ API об отказе. Таймауты относятся к неизвестному результату.
+            self.deliveries.record(day, kind, uid, attempt, 'failed', activity, type(exc).__name__)
+            return 'failed'
+        except Exception as exc:
+            self.deliveries.record(day, kind, uid, attempt, 'unknown', activity, type(exc).__name__)
+            return 'unknown'
+        self.deliveries.record(day, kind, uid, attempt, 'sent', activity)
+        return 'sent'
+
+    def daily_reports(self, local):
+        if local.hour < 19:
+            return
+        day = local.date().isoformat()
+        with self.report_lock:
+            for uid in sorted(self.admins):
+                rows = self.deliveries.snapshot()
+                # Резервирование также предотвращает дубль после перезапуска.
+                if any(len(r) >= 7 and r[2] == day and r[3] == 'report'
+                       and r[4] == str(uid) for r in rows):
+                    continue
+                self.tracked_send(day, 'report', uid, delivery_report(rows, day))
+
     def invitations(self):
         # Не более двух приглашений за календарную неделю, без ночных отправок.
         while True:
             time.sleep(30)
             local = datetime.now(ZoneInfo('Europe/Minsk'))
-            if not 16 <= local.hour < 19:
-                continue
-            week = local.strftime('%G-W%V')
-            for uid in list(self.journal.states):
-                with self.user_lock(uid):
-                    try:
-                        self.ready()
-                        current = self.journal.states.get(uid)
-                        a = invitation_due(current, local) if current else None
-                        if a is None: continue
-                        s = copy.deepcopy(current)
-                        s['notices'][a] = week
-                        s['rev'] += 1
-                        # Сначала резервируем отправку: при сбое не дублируем её.
-                        self.journal.commit(uid,s,{'event':'invitation_reserved','activity':a})
-                        name = self.bot.get_me().username
-                        kb = types.InlineKeyboardMarkup()
-                        kb.add(types.InlineKeyboardButton('Открыть тренировку',url=f'https://t.me/{name}?start=resume'))
-                        self.bot.send_message(uid,'Доступно задание: '+title(a)+'. Можно пройти в удобное время. Приглашения отключаются в /menu → Настройки.',reply_markup=kb)
-                    except Exception as exc:
-                        self.logger.warning('Приглашение не подтверждено: %s',type(exc).__name__)
+            if 16 <= local.hour < 19:
+                for uid in list(self.journal.states):
+                    with self.user_lock(uid):
+                        try:
+                            self.ready()
+                            local = datetime.now(ZoneInfo('Europe/Minsk'))
+                            current = self.journal.states.get(uid)
+                            a = invitation_due(current, local) if current else None
+                            if a is None:
+                                continue
+                            name = self.bot.get_me().username
+                            kb = types.InlineKeyboardMarkup()
+                            kb.add(types.InlineKeyboardButton('Открыть тренировку',url=f'https://t.me/{name}?start=resume'))
+                            s = copy.deepcopy(current)
+                            s['notices'][a] = local.strftime('%G-W%V')
+                            s['rev'] += 1
+                            self.journal.commit(uid,s,{'event':'invitation_reserved','activity':a})
+                            self.tracked_send(local.date().isoformat(), 'reminder', uid,
+                                'Доступно задание: '+title(a)+'. Можно пройти в удобное время. Приглашения отключаются в /menu → Настройки.',
+                                activity=a, reply_markup=kb)
+                        except Exception as exc:
+                            self.logger.warning('Приглашение не подтверждено: %s',type(exc).__name__)
+            try:
+                self.daily_reports(datetime.now(ZoneInfo('Europe/Minsk')))
+            except Exception as exc:
+                self.logger.warning('Отчёт не подтверждён: %s',type(exc).__name__)
 
     def send_daily_message(self):
         pass  # Совместимость: прежние групповые рассылки выключены.
