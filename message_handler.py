@@ -50,23 +50,45 @@ def available_at(s, activity):
     if s['class_code'] == 'test' or activity in (None, 'pre', 'm0'):
         return 0
     if activity.startswith('m'):
-        return s['enrolled_at'] + int(activity[1:]) * 7 * DAY
+        return s['enrolled_at'] + int(activity[1:]) * 4 * DAY
     if activity.startswith('r'):
-        return s['results']['m' + activity[1:]]['finished_at'] + 3 * DAY
+        return s['results']['m' + activity[1:]]['finished_at'] + 2 * DAY
     return s['results']['r3']['finished_at']
+
+def reminder_history(s):
+    # Старые приглашения учитываются в недельном лимите после обновления.
+    if 'reminder_history' in s:
+        return s['reminder_history']
+    return [dict(activity=a, week=week, sent_at=0)
+            for a, week in s.get('notices', {}).items()]
+
 
 def invitation_due(s, local):
     if not 16 <= local.hour < 19 or not s['enrolled_at'] or not s['notifications'] or s['class_code']=='test':
         return None
     a = next_activity(s)
-    if not a or now() < available_at(s,a):
+    stamp = now()
+    if not a or stamp < available_at(s, a):
         return None
-    if s['active'] and s['active']['id']==a and now() < s.get('last_interaction', s['enrolled_at']) + 3*DAY:
-        return None
+    history = reminder_history(s)
     week = local.strftime('%G-W%V')
-    if a in s['notices'] or sum(v==week for v in s['notices'].values()) >= 2:
+    if sum(item['week'] == week for item in history) >= 3:
+        return None
+    # Не более одного приглашения за день, включая разные этапы.
+    if any(item.get('sent_at', 0) and
+           datetime.fromtimestamp(item['sent_at'], ZoneInfo('Europe/Minsk')).date() == local.date()
+           for item in history):
+        return None
+    previous = [item for item in history if item['activity'] == a]
+    last_interaction = s.get('last_interaction', s['enrolled_at'])
+    if previous:
+        last_sent = max(item.get('sent_at', 0) for item in previous)
+        if stamp < max(last_sent, last_interaction) + 3 * DAY:
+            return None
+    elif s['active'] and s['active']['id'] == a and stamp < last_interaction + 3 * DAY:
         return None
     return a
+
 
 def new_state(code=None):
     return dict(version=VERSION, id=uuid.uuid4().hex[:12], rev=0,
@@ -226,7 +248,7 @@ def render(s):
                 'Сначала — стартовая проверка, затем занятия, повторы и итог. Это не школьная отметка.\n\n'
                 'Сохраняются Telegram ID, выбранный класс, ответы и прогресс. Имя не записывается. '
                 'Результаты доступны организатору проекта. Продолжить позже можно командой /continue.\n\n'
-                'После регистрации напоминания включены: до двух сообщений в неделю с 16:00 до 19:00 по Минску. '
+                'После регистрации напоминания включены: до трёх сообщений в неделю с 16:00 до 19:00 по Минску. '
                 'Отключить их можно в настройках. В режиме «Тестирование» рассылки нет.')
         add('Продолжить','intro')
     elif screen == 'class':
@@ -236,10 +258,10 @@ def render(s):
     elif screen == 'confirm':
         text = f"Твой выбор: {CLASSES[s['class_code']]}. Всё верно?"
         if 'notification_preference' not in s and s['class_code'] != 'test':
-            text += '\n\nНапоминания включатся после подтверждения: до двух сообщений в неделю, с 16:00 до 19:00 по Минску. Отключить их можно в настройках.'
+            text += '\n\nНапоминания включатся после подтверждения: до трёх сообщений в неделю, с 16:00 до 19:00 по Минску. Отключить их можно в настройках.'
         add('Да, всё верно','confirm','yes'); add('Выбрать другой','confirm','no')
     elif screen == 'notice_choice':
-        text = 'После регистрации напоминания включены: до двух сообщений в неделю с 16:00 до 19:00 по Минску. Отключить их можно в настройках. В режиме «Тестирование» рассылки нет.'
+        text = 'После регистрации напоминания включены: до трёх сообщений в неделю с 16:00 до 19:00 по Минску. Отключить их можно в настройках. В режиме «Тестирование» рассылки нет.'
         add('Продолжить','notify','off' if s['class_code'] == 'test' else 'on')
     elif screen == 'menu':
         a = next_activity(s)
@@ -671,7 +693,7 @@ class MessageHandler:
                 self.tracked_send(day, 'report', uid, delivery_report(rows, day))
 
     def invitations(self):
-        # Не более двух приглашений за календарную неделю, без ночных отправок.
+        # Не более трёх приглашений за календарную неделю, без ночных отправок.
         while True:
             time.sleep(30)
             local = datetime.now(ZoneInfo('Europe/Minsk'))
@@ -689,11 +711,13 @@ class MessageHandler:
                             kb = types.InlineKeyboardMarkup()
                             kb.add(types.InlineKeyboardButton('Открыть тренировку',url=f'https://t.me/{name}?start=resume'))
                             s = copy.deepcopy(current)
+                            s['reminder_history'] = list(reminder_history(s))
+                            s['reminder_history'].append(dict(activity=a, week=local.strftime('%G-W%V'), sent_at=now()))
                             s['notices'][a] = local.strftime('%G-W%V')
                             s['rev'] += 1
                             self.journal.commit(uid,s,{'event':'invitation_reserved','activity':a})
                             self.tracked_send(local.date().isoformat(), 'reminder', uid,
-                                'Доступно задание: '+title(a)+'. Можно пройти в удобное время. Приглашения отключаются в /menu → Настройки.',
+                                ('Вас ждёт короткое повторение: ' if a.startswith('r') else 'Можно продолжить задание: ') + title(a) + '. Нажмите кнопку ниже. Напоминания отключаются в /menu → Настройки.',
                                 activity=a, reply_markup=kb)
                         except Exception as exc:
                             self.logger.warning('Приглашение не подтверждено: %s',type(exc).__name__)
